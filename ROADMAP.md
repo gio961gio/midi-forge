@@ -1,6 +1,6 @@
 # Midi Forge - Development Roadmap
 
-This roadmap outlines planned future work for **Midi Forge**. Over **30 hours** of software engineering development are scheduled across four phases.
+This roadmap outlines completed milestones and planned future work for **Midi Forge**. Over **30 hours** of software engineering development are scheduled across four phases.
 
 ---
 
@@ -12,6 +12,19 @@ This roadmap outlines planned future work for **Midi Forge**. Over **30 hours** 
 - [x] Grid quantizer with swing support.
 - [x] CLI subcommands (`generate`, `humanize`, `quantize`, `inspect`, `to-json`).
 - [x] Unit test suite.
+
+---
+
+## Phase 1.1: MIDI Engine Stabilization (Completed - v0.1.1)
+- [x] **Unambiguous Absolute-Tick Time Model**: Canonical `tick` field for all events; delta conversion only during SMF serialization/parsing.
+- [x] **Hardened Parser & Chunk Bounds**: Header validation, MTrk chunk bounds checking, VLQ bounds (<= 4 bytes, <= 0x0FFFFFFF), and running status state machine.
+- [x] **Channel Voice & Meta Event Coverage**: Full payload support for CC, Program Change, Channel Pressure, Poly Aftertouch, Pitch Bend, Time/Key Signature, arbitrary meta events, and SysEx.
+- [x] **Deterministic FIFO Note Pairing**: Reusable `pair_notes` engine matching note-ons with note-offs, including velocity-zero note-off handling and overlapping same-pitch notes.
+- [x] **Duration-Preserving Humanization & Isolated RNG**: Note duration invariant preserved across timing jitter; local `random.Random` instance avoiding global state mutation.
+- [x] **Absolute Tick Quantization & Swing**: Grid quantization and swing operating on paired note onsets, enforcing positive note durations and leaving non-note events intact.
+- [x] **Diatonic Modal Triads & Validation**: 7-mode diatonic triad chord generator; strict rejection of malformed tokens and unsupported Roman numeral scales (no silent fallbacks).
+- [x] **Non-Destructive File Safety**: CLI `--force` guard, deterministic default filenames (`<input>_humanized.mid`, `<input>_quantized.mid`), and atomic temporary file writes.
+- [x] **CI & Multi-Platform Matrix**: GitHub Actions workflow testing Ubuntu and Windows across Python 3.9, 3.10, 3.11, and 3.12.
 
 ---
 

@@ -1,11 +1,11 @@
-"""Unit tests for Midi Forge."""
+"""Integrated high-level unit tests for Midi Forge."""
 import os
 import tempfile
 import pytest
 from midi_forge.midi_io import MidiFile, MidiTrack, MidiEvent
 from midi_forge.theory import note_to_midi, midi_to_note, get_scale_notes, parse_progression
 from midi_forge.generator import generate_progression_midi
-from midi_forge.processors import humanize, quantize
+from midi_forge.processors import humanize, quantize, pair_notes
 
 
 def test_note_conversion():
@@ -39,16 +39,16 @@ def test_midi_save_and_load():
 
         loaded = MidiFile.load(out_mid)
         assert len(loaded.tracks) >= 1
-        note_events = [e for e in loaded.tracks[0].events if e.type == "note_on"]
+        note_events = [e for e in loaded.tracks[0].events if e.type == "note_on" and e.velocity > 0]
         assert len(note_events) > 0
 
 
 def test_humanize_processor():
     mf = generate_progression_midi(root="C", scale="major", progression="I-V")
-    original_vels = [e.velocity for e in mf.tracks[0].events if e.type == "note_on"]
+    original_vels = [e.velocity for e in mf.tracks[0].events if e.type == "note_on" and e.velocity > 0]
 
     humanized = humanize(mf, timing_jitter_ticks=10, velocity_variance=15, seed=42)
-    new_vels = [e.velocity for e in humanized.tracks[0].events if e.type == "note_on"]
+    new_vels = [e.velocity for e in humanized.tracks[0].events if e.type == "note_on" and e.velocity > 0]
 
     assert original_vels != new_vels
 
@@ -57,9 +57,11 @@ def test_quantize_processor():
     mf = MidiFile(ticks_per_beat=480)
     track = MidiTrack()
     # Add an off-grid note at tick 115 (close to 120, which is 1/16 at 480 tpb)
-    track.events.append(MidiEvent(delta_time=115, type="note_on", note=60, velocity=80))
+    track.add_note(start_tick=115, duration_ticks=60, note=60, velocity=80)
     mf.tracks.append(track)
 
     quantized = quantize(mf, grid="1/16", strength=1.0)
     # 1/16 grid at 480 tpb is 120 ticks
-    assert quantized.tracks[0].events[0].delta_time == 120
+    pairs, _ = pair_notes(quantized.tracks[0])
+    assert pairs[0].note_on.tick == 120
+    assert pairs[0].duration == 60
