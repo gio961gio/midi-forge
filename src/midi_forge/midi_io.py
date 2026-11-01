@@ -60,10 +60,10 @@ def write_vlq(value: int) -> bytes:
     """
     Encode a non-negative integer into Variable Length Quantity bytes (up to 4 bytes).
 
-    Raises ValueError on negative values or values exceeding 0x0FFFFFFF.
+    Raises ValueError on negative values, non-integers, or values exceeding 0x0FFFFFFF.
     """
-    if not isinstance(value, int) or value < 0:
-        raise ValueError(f"VLQ value must be a non-negative integer, got: {value}")
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError(f"VLQ value must be a non-negative integer, got: {value!r}")
     if value > 0x0FFFFFFF:
         raise ValueError(f"VLQ value {value} exceeds SMF maximum 0x0FFFFFFF")
 
@@ -113,6 +113,8 @@ class MidiEvent:
         Decoded text for text/track_name events.
     raw_data : bytes, default b""
         Preserved raw byte payload for meta/sysex events.
+    sysex_status : int, default 0xF0
+        Preserved SysEx status byte (0xF0 or 0xF7).
     """
     tick: int = 0
     type: str = "note_on"
@@ -128,10 +130,11 @@ class MidiEvent:
     meta_type: int = 0
     text: str = ""
     raw_data: bytes = b""
+    sysex_status: int = 0xF0
 
     def __post_init__(self):
-        if self.tick < 0:
-            raise ValueError(f"Event tick must be non-negative, got: {self.tick}")
+        if not isinstance(self.tick, int) or isinstance(self.tick, bool) or self.tick < 0:
+            raise ValueError(f"Event tick must be a non-negative integer, got: {self.tick!r}")
 
     @property
     def delta_time(self) -> int:
@@ -140,8 +143,8 @@ class MidiEvent:
 
     @delta_time.setter
     def delta_time(self, val: int):
-        if val < 0:
-            raise ValueError(f"Event tick must be non-negative, got: {val}")
+        if not isinstance(val, int) or isinstance(val, bool) or val < 0:
+            raise ValueError(f"Event tick must be a non-negative integer, got: {val!r}")
         self.tick = val
 
     @property
@@ -176,20 +179,20 @@ class MidiTrack:
         note : int
             MIDI pitch (0-127).
         velocity : int, default 80
-            Note velocity (1-127).
+            Note velocity (0-127).
         channel : int, default 0
             MIDI channel (0-15).
         """
-        if start_tick < 0:
-            raise ValueError(f"start_tick must be non-negative, got: {start_tick}")
-        if duration_ticks <= 0:
-            raise ValueError(f"duration_ticks must be positive, got: {duration_ticks}")
-        if not (0 <= note <= 127):
-            raise ValueError(f"note pitch must be in 0..127, got: {note}")
-        if not (0 <= velocity <= 127):
-            raise ValueError(f"velocity must be in 0..127, got: {velocity}")
-        if not (0 <= channel <= 15):
-            raise ValueError(f"channel must be in 0..15, got: {channel}")
+        if not isinstance(start_tick, int) or isinstance(start_tick, bool) or start_tick < 0:
+            raise ValueError(f"start_tick must be a non-negative integer, got: {start_tick!r}")
+        if not isinstance(duration_ticks, int) or isinstance(duration_ticks, bool) or duration_ticks <= 0:
+            raise ValueError(f"duration_ticks must be a positive integer, got: {duration_ticks!r}")
+        if not isinstance(note, int) or isinstance(note, bool) or not (0 <= note <= 127):
+            raise ValueError(f"note pitch must be an integer in 0..127, got: {note!r}")
+        if not isinstance(velocity, int) or isinstance(velocity, bool) or not (0 <= velocity <= 127):
+            raise ValueError(f"velocity must be an integer in 0..127, got: {velocity!r}")
+        if not isinstance(channel, int) or isinstance(channel, bool) or not (0 <= channel <= 15):
+            raise ValueError(f"channel must be an integer in 0..15, got: {channel!r}")
 
         self.events.append(
             MidiEvent(tick=start_tick, type="note_on", channel=channel, note=note, velocity=velocity)
@@ -197,6 +200,36 @@ class MidiTrack:
         self.events.append(
             MidiEvent(tick=start_tick + duration_ticks, type="note_off", channel=channel, note=note, velocity=0)
         )
+
+
+def _validate_int_field(ev_type: str, field_name: str, value: Any, min_val: int, max_val: int):
+    """Validate an integer field is within inclusive range [min_val, max_val]."""
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(
+            f"Event '{ev_type}': field '{field_name}' must be an integer, got {type(value).__name__} ({value!r})"
+        )
+    if not (min_val <= value <= max_val):
+        raise ValueError(
+            f"Event '{ev_type}': field '{field_name}' value {value} out of range ({min_val}..{max_val})"
+        )
+
+
+SUPPORTED_EVENT_TYPES = {
+    "note_on",
+    "note_off",
+    "poly_pressure",
+    "control_change",
+    "program_change",
+    "channel_pressure",
+    "pitch_bend",
+    "set_tempo",
+    "time_signature",
+    "key_signature",
+    "text",
+    "meta",
+    "sysex",
+    "end_of_track",
+}
 
 
 @dataclass
@@ -329,7 +362,7 @@ class MidiFile:
                             text_str = meta_data.decode("latin1", errors="replace")
                         track.name = text_str
                         track.events.append(
-                            MidiEvent(tick=current_tick, type="text", text=text_str, raw_data=meta_data)
+                            MidiEvent(tick=current_tick, type="text", meta_type=0x03, text=text_str, raw_data=meta_data)
                         )
                     elif meta_type == 0x58:  # Time Signature
                         track.events.append(
@@ -343,7 +376,7 @@ class MidiFile:
                         track.events.append(
                             MidiEvent(tick=current_tick, type="end_of_track", raw_data=meta_data)
                         )
-                    else:  # Preserved arbitrary meta event
+                    else:  # Preserved arbitrary meta event (e.g. 0x01, 0x02, 0x04, 0x05, etc.)
                         track.events.append(
                             MidiEvent(tick=current_tick, type="meta", meta_type=meta_type, raw_data=meta_data)
                         )
@@ -356,7 +389,7 @@ class MidiFile:
                     sysex_data = track_bytes[t_offset : t_offset + sysex_len]
                     t_offset += sysex_len
                     track.events.append(
-                        MidiEvent(tick=current_tick, type="sysex", raw_data=sysex_data)
+                        MidiEvent(tick=current_tick, type="sysex", sysex_status=status, raw_data=sysex_data)
                     )
 
                 # Handle Channel Voice Messages (0x80..0xEF)
@@ -430,28 +463,166 @@ class MidiFile:
 
         return mf
 
+    def validate_for_save(self):
+        """
+        Pre-serialization validation of all file, track, and event fields.
+
+        Enforces SMF specifications without silently masking or clamping values.
+        Raises ValueError with offending field, value, and valid range.
+        """
+        if not isinstance(self.format_type, int) or isinstance(self.format_type, bool) or self.format_type not in (0, 1):
+            raise ValueError(f"Unsupported MIDI format_type: {self.format_type!r}. Supported formats: 0, 1")
+
+        if not isinstance(self.ticks_per_beat, int) or isinstance(self.ticks_per_beat, bool) or not (1 <= self.ticks_per_beat <= 32767):
+            raise ValueError(
+                f"ticks_per_beat must be a positive integer in range 1..32767 (15-bit PPQ), got: {self.ticks_per_beat!r}"
+            )
+
+        if not isinstance(self.tracks, list) or not (0 <= len(self.tracks) <= 65535):
+            raise ValueError(f"Track count must be in range 0..65535, got: {len(self.tracks)}")
+
+        if self.format_type == 0 and len(self.tracks) != 1:
+            raise ValueError(f"Format 0 MIDI file must contain exactly 1 track, got {len(self.tracks)}")
+
+        for track_idx, track in enumerate(self.tracks):
+            if not isinstance(track, MidiTrack):
+                raise ValueError(f"Track at index {track_idx} is not an instance of MidiTrack")
+
+            for ev in track.events:
+                if not isinstance(ev.tick, int) or isinstance(ev.tick, bool) or ev.tick < 0:
+                    raise ValueError(f"Event tick must be a non-negative integer, got: {ev.tick!r}")
+                if ev.tick > 0x0FFFFFFF:
+                    raise ValueError(f"Event tick {ev.tick} exceeds SMF maximum 0x0FFFFFFF")
+
+                if ev.type not in SUPPORTED_EVENT_TYPES:
+                    raise ValueError(f"Unrecognized or unsupported event type: '{ev.type}'")
+
+                # Channel voice events
+                if ev.type in (
+                    "note_on", "note_off", "poly_pressure", "control_change",
+                    "program_change", "channel_pressure", "pitch_bend"
+                ):
+                    _validate_int_field(ev.type, "channel", ev.channel, 0, 15)
+
+                if ev.type in ("note_on", "note_off"):
+                    _validate_int_field(ev.type, "note", ev.note, 0, 127)
+                    _validate_int_field(ev.type, "velocity", ev.velocity, 0, 127)
+                elif ev.type == "poly_pressure":
+                    _validate_int_field(ev.type, "note", ev.note, 0, 127)
+                    _validate_int_field(ev.type, "pressure", ev.pressure, 0, 127)
+                elif ev.type == "control_change":
+                    _validate_int_field(ev.type, "control", ev.control, 0, 127)
+                    _validate_int_field(ev.type, "value", ev.value, 0, 127)
+                elif ev.type == "program_change":
+                    _validate_int_field(ev.type, "program", ev.program, 0, 127)
+                elif ev.type == "channel_pressure":
+                    _validate_int_field(ev.type, "pressure", ev.pressure, 0, 127)
+                elif ev.type == "pitch_bend":
+                    _validate_int_field(ev.type, "pitch_bend", ev.pitch_bend, 0, 16383)
+                elif ev.type == "set_tempo":
+                    _validate_int_field(ev.type, "tempo", ev.tempo, 1, 0xFFFFFF)
+                    if ev.raw_data and len(ev.raw_data) != 3:
+                        raise ValueError(f"Event 'set_tempo': raw_data length must be 3 bytes, got {len(ev.raw_data)}")
+                elif ev.type == "time_signature":
+                    if ev.raw_data and len(ev.raw_data) != 4:
+                        raise ValueError(f"Event 'time_signature': raw_data length must be 4 bytes, got {len(ev.raw_data)}")
+                elif ev.type == "key_signature":
+                    if ev.raw_data and len(ev.raw_data) != 2:
+                        raise ValueError(f"Event 'key_signature': raw_data length must be 2 bytes, got {len(ev.raw_data)}")
+                elif ev.type == "text":
+                    if ev.meta_type != 0:
+                        _validate_int_field(ev.type, "meta_type", ev.meta_type, 0, 255)
+                    payload_len = len(ev.raw_data) if ev.raw_data else len(ev.text.encode("utf-8"))
+                    if payload_len > 0x0FFFFFFF:
+                        raise ValueError(f"Event 'text': payload length {payload_len} exceeds SMF limit")
+                elif ev.type == "meta":
+                    _validate_int_field(ev.type, "meta_type", ev.meta_type, 0, 255)
+                    if len(ev.raw_data) > 0x0FFFFFFF:
+                        raise ValueError(f"Event 'meta': payload length {len(ev.raw_data)} exceeds SMF limit")
+                elif ev.type == "sysex":
+                    if not isinstance(ev.sysex_status, int) or isinstance(ev.sysex_status, bool) or ev.sysex_status not in (0xF0, 0xF7):
+                        raise ValueError(f"Event 'sysex': sysex_status must be 0xF0 or 0xF7, got: {ev.sysex_status!r}")
+                    if not isinstance(ev.raw_data, (bytes, bytearray)):
+                        raise ValueError(f"Event 'sysex': raw_data must be bytes or bytearray, got {type(ev.raw_data).__name__}")
+                    if len(ev.raw_data) > 0x0FFFFFFF:
+                        raise ValueError(f"Event 'sysex': payload length {len(ev.raw_data)} exceeds SMF limit")
+
     def save(self, file_path: str):
         """
         Serialize in-memory MidiFile structure to a Standard MIDI File (.mid).
 
         Guarantees:
+        - Pre-serialization validation of all file, track, and event fields without silent masking/clamping.
+        - Deterministic sorting by absolute tick and event priority.
         - Non-negative delta times derived from sorted absolute tick positions.
-        - Preserves all channel events, meta events, and SysEx.
+        - Preserves exact SysEx status (0xF0 vs 0xF7) and payload bytes.
+        - Authoritative track.name serialization with deduplication of Track Name meta events (0x03).
+        - Preserves all other text and arbitrary meta events with their original meta_type and payload.
         - Exactly one final end_of_track event per track.
         """
+        self.validate_for_save()
+
         out = bytearray()
-        # MThd header chunk
         out.extend(b"MThd")
         out.extend(struct.pack(">IHHH", 6, self.format_type, len(self.tracks), self.ticks_per_beat))
 
         for track in self.tracks:
             track_bytes = bytearray()
 
-            # Separate non-EOT events from EOT events to avoid duplicate EOTs
-            non_eot_events = [e for e in track.events if e.type != "end_of_track"]
-            eot_events = [e for e in track.events if e.type == "end_of_track"]
+            # Handle track name and meta events:
+            # A track name event is identified by (type == "text" and meta_type in (0, 0x03)) or (type == "meta" and meta_type == 0x03).
+            # track.name is authoritative:
+            # If track.name is non-empty:
+            # - The first track name event (or a newly synthesized one at tick 0 if none exist) is updated with track.name.
+            # - Any subsequent track name events are omitted to prevent duplicates.
+            # All other events (including other meta/text types like 0x01, 0x02, 0x05) are preserved.
+            processed_events = []
+            track_name_found = False
+            target_name = track.name.strip() if track.name else ""
 
-            # Sort events deterministically: first by absolute tick, then by EVENT_PRIORITY
+            for ev in track.events:
+                is_track_name_event = (
+                    (ev.type == "text" and ev.meta_type in (0, 0x03))
+                    or (ev.type == "meta" and ev.meta_type == 0x03)
+                )
+                if is_track_name_event:
+                    if not track_name_found:
+                        track_name_found = True
+                        if target_name:
+                            processed_events.append(
+                                MidiEvent(
+                                    tick=ev.tick,
+                                    type="text",
+                                    meta_type=0x03,
+                                    text=target_name,
+                                    raw_data=target_name.encode("utf-8"),
+                                )
+                            )
+                        else:
+                            processed_events.append(ev)
+                    else:
+                        # Drop duplicate track name event
+                        continue
+                else:
+                    processed_events.append(ev)
+
+            # If track has a non-empty name but no track name event existed, synthesize one at tick 0
+            if target_name and not track_name_found:
+                processed_events.insert(
+                    0,
+                    MidiEvent(
+                        tick=0,
+                        type="text",
+                        meta_type=0x03,
+                        text=target_name,
+                        raw_data=target_name.encode("utf-8"),
+                    ),
+                )
+
+            # Separate non-EOT events from EOT events to avoid duplicate EOTs
+            non_eot_events = [e for e in processed_events if e.type != "end_of_track"]
+            eot_events = [e for e in processed_events if e.type == "end_of_track"]
+
             sorted_events = sorted(
                 non_eot_events,
                 key=lambda e: (e.tick, EVENT_PRIORITY.get(e.type, 50))
@@ -465,34 +636,33 @@ class MidiFile:
 
             last_tick = 0
             for ev in sorted_events:
-                if ev.tick < last_tick:
-                    raise ValueError(f"Event tick {ev.tick} precedes previous event tick {last_tick}")
                 delta = ev.tick - last_tick
+                if delta < 0:
+                    raise ValueError(f"Event tick {ev.tick} precedes previous event tick {last_tick}")
                 last_tick = ev.tick
                 track_bytes.extend(write_vlq(delta))
 
                 if ev.type == "note_on":
-                    track_bytes.extend(bytes([0x90 | (ev.channel & 0x0F), ev.note & 0x7F, ev.velocity & 0x7F]))
+                    track_bytes.extend(bytes([0x90 | ev.channel, ev.note, ev.velocity]))
                 elif ev.type == "note_off":
-                    track_bytes.extend(bytes([0x80 | (ev.channel & 0x0F), ev.note & 0x7F, ev.velocity & 0x7F]))
+                    track_bytes.extend(bytes([0x80 | ev.channel, ev.note, ev.velocity]))
                 elif ev.type == "poly_pressure":
-                    track_bytes.extend(bytes([0xA0 | (ev.channel & 0x0F), ev.note & 0x7F, ev.pressure & 0x7F]))
+                    track_bytes.extend(bytes([0xA0 | ev.channel, ev.note, ev.pressure]))
                 elif ev.type == "control_change":
-                    track_bytes.extend(bytes([0xB0 | (ev.channel & 0x0F), ev.control & 0x7F, ev.value & 0x7F]))
+                    track_bytes.extend(bytes([0xB0 | ev.channel, ev.control, ev.value]))
                 elif ev.type == "program_change":
-                    track_bytes.extend(bytes([0xC0 | (ev.channel & 0x0F), ev.program & 0x7F]))
+                    track_bytes.extend(bytes([0xC0 | ev.channel, ev.program]))
                 elif ev.type == "channel_pressure":
-                    track_bytes.extend(bytes([0xD0 | (ev.channel & 0x0F), ev.pressure & 0x7F]))
+                    track_bytes.extend(bytes([0xD0 | ev.channel, ev.pressure]))
                 elif ev.type == "pitch_bend":
-                    pb = max(0, min(16383, ev.pitch_bend))
-                    track_bytes.extend(bytes([0xE0 | (ev.channel & 0x0F), pb & 0x7F, (pb >> 7) & 0x7F]))
+                    track_bytes.extend(bytes([0xE0 | ev.channel, ev.pitch_bend & 0x7F, (ev.pitch_bend >> 7) & 0x7F]))
                 elif ev.type == "set_tempo":
-                    t_val = max(1, min(0xFFFFFF, ev.tempo))
-                    tempo_bytes = bytes([(t_val >> 16) & 0xFF, (t_val >> 8) & 0xFF, t_val & 0xFF])
+                    tempo_bytes = bytes([(ev.tempo >> 16) & 0xFF, (ev.tempo >> 8) & 0xFF, ev.tempo & 0xFF])
                     track_bytes.extend(bytes([0xFF, 0x51, 0x03]) + tempo_bytes)
                 elif ev.type == "text":
+                    meta_type = ev.meta_type if ev.meta_type != 0 else 0x03
                     payload = ev.raw_data if ev.raw_data else ev.text.encode("utf-8")
-                    track_bytes.extend(bytes([0xFF, 0x03]) + write_vlq(len(payload)) + payload)
+                    track_bytes.extend(bytes([0xFF, meta_type]) + write_vlq(len(payload)) + payload)
                 elif ev.type == "time_signature":
                     payload = ev.raw_data if ev.raw_data else bytes([4, 2, 24, 8])
                     track_bytes.extend(bytes([0xFF, 0x58]) + write_vlq(len(payload)) + payload)
@@ -500,9 +670,9 @@ class MidiFile:
                     payload = ev.raw_data if ev.raw_data else bytes([0, 0])
                     track_bytes.extend(bytes([0xFF, 0x59]) + write_vlq(len(payload)) + payload)
                 elif ev.type == "sysex":
-                    track_bytes.extend(bytes([0xF0]) + write_vlq(len(ev.raw_data)) + ev.raw_data)
+                    track_bytes.extend(bytes([ev.sysex_status]) + write_vlq(len(ev.raw_data)) + ev.raw_data)
                 elif ev.type == "meta":
-                    track_bytes.extend(bytes([0xFF, ev.meta_type & 0xFF]) + write_vlq(len(ev.raw_data)) + ev.raw_data)
+                    track_bytes.extend(bytes([0xFF, ev.meta_type]) + write_vlq(len(ev.raw_data)) + ev.raw_data)
 
             # Append the single final End-of-Track marker
             eot_delta = max(0, final_eot_tick - last_tick)
@@ -535,10 +705,13 @@ class MidiFile:
                             "control": e.control if e.type == "control_change" else None,
                             "value": e.value if e.type == "control_change" else None,
                             "program": e.program if e.type == "program_change" else None,
+                            "pressure": e.pressure if e.type in ("poly_pressure", "channel_pressure") else None,
                             "pitch_bend": e.pitch_bend if e.type == "pitch_bend" else None,
                             "tempo": e.tempo if e.type == "set_tempo" else None,
                             "bpm": e.bpm if e.type == "set_tempo" else None,
+                            "meta_type": e.meta_type if e.type in ("meta", "text") else None,
                             "text": e.text if e.type == "text" else None,
+                            "sysex_status": e.sysex_status if e.type == "sysex" else None,
                         }
                         for e in t.events
                     ],

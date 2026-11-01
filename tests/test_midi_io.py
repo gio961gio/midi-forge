@@ -347,3 +347,307 @@ def test_exactly_one_eot_no_duplicates():
         eots = [e for e in loaded.tracks[0].events if e.type == "end_of_track"]
         assert len(eots) == 1
         assert eots[0].tick == 200
+
+
+# =========================================================================
+# 6. SysEx 0xF0 vs 0xF7 Status Preservation and Validation
+# =========================================================================
+
+def test_sysex_f0_vs_f7_roundtrip_and_validation():
+    """Verify 0xF0 and 0xF7 SysEx events survive load/save round trips without mutation."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "sysex_status.mid")
+        mf = MidiFile(format_type=1, ticks_per_beat=480)
+        track = MidiTrack(name="SysEx Track")
+
+        f0_payload = b"\x7E\x7F\x09\x01\xF7"
+        f7_payload = b"\x00\x41\x10\x42\x12\x40"
+
+        track.events.extend([
+            MidiEvent(tick=0, type="sysex", sysex_status=0xF0, raw_data=f0_payload),
+            MidiEvent(tick=240, type="sysex", sysex_status=0xF7, raw_data=f7_payload),
+            MidiEvent(tick=480, type="end_of_track"),
+        ])
+        mf.tracks.append(track)
+        mf.save(path)
+
+        loaded = MidiFile.load(path)
+        levs = loaded.tracks[0].events
+
+        sysex_events = [e for e in levs if e.type == "sysex"]
+        assert len(sysex_events) == 2
+
+        # Verify 0xF0 event
+        assert sysex_events[0].tick == 0
+        assert sysex_events[0].sysex_status == 0xF0
+        assert sysex_events[0].raw_data == f0_payload
+
+        # Verify 0xF7 event (status preserved!)
+        assert sysex_events[1].tick == 240
+        assert sysex_events[1].sysex_status == 0xF7
+        assert sysex_events[1].raw_data == f7_payload
+
+        # Writer validation: invalid sysex_status must raise ValueError
+        bad_track = MidiTrack(name="Bad SysEx")
+        bad_track.events.append(MidiEvent(tick=0, type="sysex", sysex_status=0x00, raw_data=b"\x01"))
+        bad_mf = MidiFile(tracks=[bad_track])
+        with pytest.raises(ValueError, match="sysex_status must be 0xF0 or 0xF7"):
+            bad_mf.save(os.path.join(tmp, "bad_sysex.mid"))
+
+        bad_track.events[0].sysex_status = 0x80
+        with pytest.raises(ValueError, match="sysex_status must be 0xF0 or 0xF7"):
+            bad_mf.save(os.path.join(tmp, "bad_sysex2.mid"))
+
+
+# =========================================================================
+# 7. Track Name Preservation, Authority, and Deduplication
+# =========================================================================
+
+def test_track_name_preservation_and_deduplication():
+    """Verify track.name survives save/load, deduplicates 0x03 events, and preserves other text meta."""
+    with tempfile.TemporaryDirectory() as tmp:
+        # 1. MidiTrack(name="Piano") without explicit text event
+        piano_path = os.path.join(tmp, "piano.mid")
+        mf_piano = MidiFile(format_type=1, ticks_per_beat=480)
+        track_piano = MidiTrack(name="Piano")
+        track_piano.events.append(MidiEvent(tick=0, type="note_on", note=60, velocity=80))
+        track_piano.events.append(MidiEvent(tick=480, type="note_off", note=60, velocity=0))
+        mf_piano.tracks.append(track_piano)
+        mf_piano.save(piano_path)
+
+        loaded_piano = MidiFile.load(piano_path)
+        assert loaded_piano.tracks[0].name == "Piano"
+        track_name_events = [e for e in loaded_piano.tracks[0].events if e.type == "text"]
+        assert len(track_name_events) == 1
+        assert track_name_events[0].text == "Piano"
+
+        # 2. Existing explicit track name event is not duplicated
+        dedup_path = os.path.join(tmp, "dedup.mid")
+        mf_dedup = MidiFile(format_type=1, ticks_per_beat=480)
+        track_dedup = MidiTrack(name="Guitar")
+        track_dedup.events.extend([
+            MidiEvent(tick=0, type="text", meta_type=0x03, text="Guitar", raw_data=b"Guitar"),
+            MidiEvent(tick=0, type="text", meta_type=0x03, text="Duplicate", raw_data=b"Duplicate"),
+            MidiEvent(tick=240, type="end_of_track"),
+        ])
+        mf_dedup.tracks.append(track_dedup)
+        mf_dedup.save(dedup_path)
+
+        loaded_dedup = MidiFile.load(dedup_path)
+        assert loaded_dedup.tracks[0].name == "Guitar"
+        assert len([e for e in loaded_dedup.tracks[0].events if e.type == "text"]) == 1
+
+        # 3. Disagreement: track.name is authoritative
+        auth_path = os.path.join(tmp, "authoritative.mid")
+        mf_auth = MidiFile(format_type=1, ticks_per_beat=480)
+        track_auth = MidiTrack(name="AuthoritativeName")
+        track_auth.events.append(MidiEvent(tick=0, type="text", meta_type=0x03, text="OldName"))
+        mf_auth.tracks.append(track_auth)
+        mf_auth.save(auth_path)
+
+        loaded_auth = MidiFile.load(auth_path)
+        assert loaded_auth.tracks[0].name == "AuthoritativeName"
+
+        # 4. Other meta text events (e.g. 0x01 text, 0x02 copyright, 0x05 lyric) are preserved
+        meta_path = os.path.join(tmp, "other_text.mid")
+        mf_meta = MidiFile(format_type=1, ticks_per_beat=480)
+        track_meta = MidiTrack(name="Vocals")
+        track_meta.events.extend([
+            MidiEvent(tick=0, type="meta", meta_type=0x01, raw_data=b"General text"),
+            MidiEvent(tick=0, type="meta", meta_type=0x02, raw_data=b"(C) 2026 Author"),
+            MidiEvent(tick=100, type="meta", meta_type=0x05, raw_data=b"La la la"),
+            MidiEvent(tick=200, type="end_of_track"),
+        ])
+        mf_meta.tracks.append(track_meta)
+        mf_meta.save(meta_path)
+
+        loaded_meta = MidiFile.load(meta_path)
+        assert loaded_meta.tracks[0].name == "Vocals"
+        l_events = loaded_meta.tracks[0].events
+        meta_01 = [e for e in l_events if e.type == "meta" and e.meta_type == 0x01]
+        assert len(meta_01) == 1 and meta_01[0].raw_data == b"General text"
+        meta_02 = [e for e in l_events if e.type == "meta" and e.meta_type == 0x02]
+        assert len(meta_02) == 1 and meta_02[0].raw_data == b"(C) 2026 Author"
+        meta_05 = [e for e in l_events if e.type == "meta" and e.meta_type == 0x05]
+        assert len(meta_05) == 1 and meta_05[0].raw_data == b"La la la"
+
+
+# =========================================================================
+# 8. Strict Serialization Validation (No Silent Masking or Clamping)
+# =========================================================================
+
+def test_strict_serialization_validation_post_construction_mutations():
+    """Verify that save() rejects invalid mutated fields with clear ValueError instead of masking/clamping."""
+    with tempfile.TemporaryDirectory() as tmp:
+        dummy_path = os.path.join(tmp, "test_val.mid")
+
+        def make_valid_mf():
+            mf = MidiFile(format_type=1, ticks_per_beat=480)
+            track = MidiTrack(name="Test")
+            track.events.append(MidiEvent(tick=0, type="note_on", channel=0, note=60, velocity=64))
+            track.events.append(MidiEvent(tick=480, type="note_off", channel=0, note=60, velocity=0))
+            mf.tracks.append(track)
+            return mf
+
+        # 1. Note bounds (must be 0..127)
+        mf = make_valid_mf()
+        mf.tracks[0].events[0].note = 128
+        with pytest.raises(ValueError, match="note"):
+            mf.save(dummy_path)
+        mf.tracks[0].events[0].note = -1
+        with pytest.raises(ValueError, match="note"):
+            mf.save(dummy_path)
+        mf.tracks[0].events[0].note = 200
+        with pytest.raises(ValueError, match="note"):
+            mf.save(dummy_path)
+
+        # 2. Velocity bounds (must be 0..127)
+        mf = make_valid_mf()
+        mf.tracks[0].events[0].velocity = 128
+        with pytest.raises(ValueError, match="velocity"):
+            mf.save(dummy_path)
+        mf.tracks[0].events[0].velocity = 130
+        with pytest.raises(ValueError, match="velocity"):
+            mf.save(dummy_path)
+        mf.tracks[0].events[0].velocity = -5
+        with pytest.raises(ValueError, match="velocity"):
+            mf.save(dummy_path)
+
+        # 3. Channel bounds (must be 0..15)
+        mf = make_valid_mf()
+        mf.tracks[0].events[0].channel = 16
+        with pytest.raises(ValueError, match="channel"):
+            mf.save(dummy_path)
+        mf.tracks[0].events[0].channel = -1
+        with pytest.raises(ValueError, match="channel"):
+            mf.save(dummy_path)
+
+        # 4. Control Change bounds (0..127)
+        mf = make_valid_mf()
+        mf.tracks[0].events.append(MidiEvent(tick=10, type="control_change", control=128, value=64))
+        with pytest.raises(ValueError, match="control"):
+            mf.save(dummy_path)
+        mf.tracks[0].events[-1].control = 7
+        mf.tracks[0].events[-1].value = 250
+        with pytest.raises(ValueError, match="value"):
+            mf.save(dummy_path)
+
+        # 5. Program Change bounds (0..127)
+        mf = make_valid_mf()
+        mf.tracks[0].events.append(MidiEvent(tick=10, type="program_change", program=128))
+        with pytest.raises(ValueError, match="program"):
+            mf.save(dummy_path)
+
+        # 6. Pressure bounds (0..127)
+        mf = make_valid_mf()
+        mf.tracks[0].events.append(MidiEvent(tick=10, type="channel_pressure", pressure=128))
+        with pytest.raises(ValueError, match="pressure"):
+            mf.save(dummy_path)
+        mf.tracks[0].events[-1] = MidiEvent(tick=10, type="poly_pressure", note=60, pressure=128)
+        with pytest.raises(ValueError, match="pressure"):
+            mf.save(dummy_path)
+
+        # 7. Pitch Bend bounds (0..16383, no silent clipping!)
+        mf = make_valid_mf()
+        mf.tracks[0].events.append(MidiEvent(tick=10, type="pitch_bend", pitch_bend=16384))
+        with pytest.raises(ValueError, match="pitch_bend"):
+            mf.save(dummy_path)
+        mf.tracks[0].events[-1].pitch_bend = -1
+        with pytest.raises(ValueError, match="pitch_bend"):
+            mf.save(dummy_path)
+        mf.tracks[0].events[-1].pitch_bend = 20000
+        with pytest.raises(ValueError, match="pitch_bend"):
+            mf.save(dummy_path)
+
+        # 8. Tempo bounds (1..0xFFFFFF, no silent clipping!)
+        mf = make_valid_mf()
+        mf.tracks[0].events.append(MidiEvent(tick=0, type="set_tempo", tempo=0))
+        with pytest.raises(ValueError, match="tempo"):
+            mf.save(dummy_path)
+        mf.tracks[0].events[-1].tempo = -10
+        with pytest.raises(ValueError, match="tempo"):
+            mf.save(dummy_path)
+        mf.tracks[0].events[-1].tempo = 0x1000000
+        with pytest.raises(ValueError, match="tempo"):
+            mf.save(dummy_path)
+
+        # 9. Event tick (must be non-negative integer <= 0x0FFFFFFF)
+        mf = make_valid_mf()
+        mf.tracks[0].events[0].tick = 0x10000000
+        with pytest.raises(ValueError, match="exceeds SMF"):
+            mf.save(dummy_path)
+
+        # 10. Unsupported event type
+        mf = make_valid_mf()
+        mf.tracks[0].events.append(MidiEvent(tick=10, type="unsupported_custom_type"))
+        with pytest.raises(ValueError, match="Unrecognized or unsupported event type"):
+            mf.save(dummy_path)
+
+        # 11. Format type and track counts
+        mf = make_valid_mf()
+        mf.format_type = 2
+        with pytest.raises(ValueError, match="format_type"):
+            mf.save(dummy_path)
+        mf.format_type = 0
+        mf.tracks.append(MidiTrack(name="Extra"))
+        with pytest.raises(ValueError, match="Format 0 MIDI file must contain exactly 1 track"):
+            mf.save(dummy_path)
+
+        # 12. Ticks per beat PPQ (1..32767)
+        mf = make_valid_mf()
+        mf.ticks_per_beat = 0
+        with pytest.raises(ValueError, match="ticks_per_beat"):
+            mf.save(dummy_path)
+        mf.ticks_per_beat = -1
+        with pytest.raises(ValueError, match="ticks_per_beat"):
+            mf.save(dummy_path)
+        mf.ticks_per_beat = 32768
+        with pytest.raises(ValueError, match="ticks_per_beat"):
+            mf.save(dummy_path)
+
+
+def test_valid_boundary_values_roundtrip():
+    """Verify valid boundary values for all MIDI parameters round-trip accurately."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "boundaries.mid")
+        mf = MidiFile(format_type=1, ticks_per_beat=32767)
+        track = MidiTrack(name="Boundaries")
+
+        track.events.extend([
+            MidiEvent(tick=0, type="set_tempo", tempo=1),
+            MidiEvent(tick=0, type="set_tempo", tempo=0xFFFFFF),
+            MidiEvent(tick=0, type="note_on", channel=0, note=0, velocity=0),
+            MidiEvent(tick=0, type="note_on", channel=15, note=127, velocity=127),
+            MidiEvent(tick=10, type="pitch_bend", channel=0, pitch_bend=0),
+            MidiEvent(tick=10, type="pitch_bend", channel=15, pitch_bend=16383),
+            MidiEvent(tick=20, type="control_change", channel=0, control=0, value=0),
+            MidiEvent(tick=20, type="control_change", channel=15, control=127, value=127),
+            MidiEvent(tick=30, type="program_change", channel=0, program=0),
+            MidiEvent(tick=30, type="program_change", channel=15, program=127),
+            MidiEvent(tick=40, type="channel_pressure", channel=0, pressure=0),
+            MidiEvent(tick=40, type="channel_pressure", channel=15, pressure=127),
+            MidiEvent(tick=50, type="poly_pressure", channel=0, note=0, pressure=0),
+            MidiEvent(tick=50, type="poly_pressure", channel=15, note=127, pressure=127),
+            MidiEvent(tick=60, type="end_of_track"),
+        ])
+        mf.tracks.append(track)
+        mf.save(path)
+
+        loaded = MidiFile.load(path)
+        assert loaded.ticks_per_beat == 32767
+        levs = loaded.tracks[0].events
+
+        pbs = [e for e in levs if e.type == "pitch_bend"]
+        assert len(pbs) == 2
+        assert pbs[0].pitch_bend == 0 and pbs[0].channel == 0
+        assert pbs[1].pitch_bend == 16383 and pbs[1].channel == 15
+
+        ccs = [e for e in levs if e.type == "control_change"]
+        assert len(ccs) == 2
+        assert ccs[0].control == 0 and ccs[0].value == 0
+        assert ccs[1].control == 127 and ccs[1].value == 127
+
+        tempos = [e for e in levs if e.type == "set_tempo"]
+        assert len(tempos) == 2
+        assert tempos[0].tempo == 1
+        assert tempos[1].tempo == 0xFFFFFF
