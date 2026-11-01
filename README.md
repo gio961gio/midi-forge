@@ -3,11 +3,11 @@
 [![CI](https://github.com/gio961gio/midi-forge/actions/workflows/ci.yml/badge.svg)](https://github.com/gio961gio/midi-forge/actions/workflows/ci.yml)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Tests](https://img.shields.io/badge/tests-53%20passed-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-64%20passed-brightgreen.svg)](tests/)
 
 > **Algorithmic MIDI Generation, Musical Scale Quantization & Groove Humanization Engine**
 
-Midi Forge is a lightweight, zero-dependency pure Python library and command-line tool for procedural MIDI creation, harmonic generation, and MIDI manipulation. It features a hardened Standard MIDI File (SMF 0 and 1) parser and writer using an unambiguous absolute-tick time model, full preservation of channel and meta events, non-destructive file safety, and a modal music theory engine.
+Midi Forge is a lightweight, zero-dependency pure Python library and command-line tool for procedural MIDI creation, harmonic generation, and MIDI manipulation. It features a hardened Standard MIDI File (SMF 0 and 1) parser and writer using an unambiguous absolute-tick time model, full preservation of channel and meta events, race-safe non-destructive file safety, and a modal music theory engine.
 
 ---
 
@@ -16,8 +16,10 @@ Midi Forge is a lightweight, zero-dependency pure Python library and command-lin
 - **Robust Pure-Python SMF Engine**:
   - **Unambiguous Absolute-Tick Time Model**: All events in memory use non-negative absolute tick positions (`MidiEvent.tick`). Automatic delta-to-absolute accumulation on load and sorted delta serialization on save.
   - **Full Channel Voice Support**: Consumes exact data byte payloads for Note On (including velocity-0), Note Off, Polyphonic Aftertouch, Control Change (CC), Program Change, Channel Pressure, and 14-bit Pitch Bend.
+  - **SysEx Status Byte Preservation**: Preserves original SysEx status (`0xF0` vs `0xF7`) and exact byte payloads across load/save cycles, correctly supporting continuation and escape packets.
+  - **Authoritative Track Name & Meta Preservation**: `MidiTrack.name` is authoritative for track name events (`0x03`). Missing track name events are synthesized at tick 0 upon save, and redundant duplicate track names are omitted. Arbitrary text/meta events (`0x01` text, `0x02` copyright, `0x05` lyric, etc.) retain their distinct `meta_type` and payloads.
+  - **Strict Pre-Serialization Validation**: No silent bitmasking (`& 0x7F`) or clamping. Pre-validates channel (0-15), note/velocity/CC/program/pressure (0-127), pitch bend (0-16383), tempo (1-0xFFFFFF), PPQ (1-32767), format (0/1), and track counts, raising an informative `ValueError` on invalid in-memory data.
   - **Running Status & Boundary Validation**: Handles standard running status correctly, clearing it upon encountering meta or SysEx events. Bounds checks every chunk (`MThd`, `MTrk`), rejecting truncated files, unsupported formats (Format 2), or malformed Variable-Length Quantities (VLQs > 4 bytes or > `0x0FFFFFFF`).
-  - **Meta & SysEx Preservation**: Reads and serializes Track Name (`0x03`), Set Tempo (`0x51`), Time Signature (`0x58`), Key Signature (`0x59`), End-of-Track (`0x2F`), arbitrary meta events, and SysEx (`F0`/`F7`) without data loss.
   - **PPQ Timing**: Supports standard pulses-per-quarter-note (PPQ) divisions. (SMPTE timecode divisions are explicitly rejected).
   - **Deterministic Same-Tick Ordering**: Safe ordering for simultaneous events (meta first, note-offs before retriggered note-ons, end-of-track last).
 - **Deterministic Note Pairing & Processors**:
@@ -25,13 +27,15 @@ Midi Forge is a lightweight, zero-dependency pure Python library and command-lin
   - **Duration-Preserving Humanization**: Applies timing jitter to note onsets and offsets simultaneously so that original note duration is never altered. Jitter and velocity variances are parameterized and use isolated random state (`random.Random(seed)`), avoiding global state mutation.
   - **Swing & Quantization**: Snaps note onsets in absolute ticks to standard musical grids (`1/4`, `1/8`, `1/16`, `1/32`, `1/8T`, `1/16T`) with strength interpolation and MPC-style swing applied to offbeat subdivisions. Enforces positive minimum note durations.
 - **Harmonic Music Theory & Generator**:
-  - **Enharmonic Spelling & Octave Support**: Case-insensitive note parsing for naturals, sharps, and flats (`C#`/`Db`, `D#`/`Eb`, `F#`/`Gb`, `G#`/`Ab`, `A#`/`Bb`). Strict MIDI bounds checking (0..127, C4 = MIDI 60).
+  - **Enharmonic Spelling & Octave Crossing**: Case-insensitive note parsing with natural note offsets before boundary checking. Correctly handles octave crossings (`B#4 == C5 == 72`, `Cb4 == B3 == 59`, `E#4 == F4 == 65`, `Fb4 == E4 == 64`) under the documented `C4 = MIDI 60` convention.
+  - **Strict Roman Numeral Suffix Parsing**: Explicit grammar supporting `°` (diminished triad: root, +3, +6), `+` (augmented triad: root, +4, +8), and `7` (diatonic 4-note seventh chord stacked from scale thirds) without character stripping. Rejects malformed tokens (`I++`, `V77`) with clear errors.
   - **Diatonic Modal Triads**: Generates chord progressions from Roman numeral notation (`I-V-vi-IV`, `ii-V-I`, `i-VI-III-VII`) by stacking scale degrees across the 7 diatonic modes (Major, Natural Minor, Dorian, Phrygian, Lydian, Mixolydian, Harmonic Minor). Rejects invalid tokens without silent fallbacks.
-- **Non-Destructive File Safety**:
+- **Race-Safe Non-Destructive File Safety**:
   - CLI operations never overwrite existing destination files by default.
   - Default humanize and quantize outputs write to `<input>_humanized.mid` and `<input>_quantized.mid`.
-  - Requires an explicit `--force` flag to replace existing destinations.
-  - Atomic file writing via temporary files prevents partial or corrupt files on error.
+  - Destination publication uses atomic exclusive operations (`os.link` without replace on no-force path) to protect against concurrent file creation races.
+  - Explicit `--force` flag is required to replace existing destinations (using atomic `os.replace`).
+  - Temporary files are guaranteed to be cleaned up on all error paths.
 
 ---
 
@@ -42,16 +46,16 @@ midi-forge/
 ├── src/
 │   └── midi_forge/
 │       ├── __init__.py        # Package metadata & exports
-│       ├── midi_io.py         # Pure-Python SMF parser & writer (absolute tick model)
-│       ├── theory.py          # Scales, chord formulas, Roman numeral parser
+│       ├── midi_io.py         # Pure-Python SMF parser & writer (absolute tick model, validation)
+│       ├── theory.py          # Scales, chord formulas, strict Roman numeral parser
 │       ├── generator.py       # Algorithmic chord progression generator
 │       ├── processors.py      # FIFO note pairing, humanizer, swing quantizer
-│       └── cli.py             # CLI with non-destructive file safety
+│       └── cli.py             # CLI with race-safe non-destructive file safety
 ├── tests/
-│   ├── test_midi_io.py        # VLQ, header bounds, running status, SMF roundtrip
+│   ├── test_midi_io.py        # VLQ, header bounds, running status, SysEx, validation, SMF roundtrip
 │   ├── test_processors.py     # Note pairing, humanization, swing quantization
-│   ├── test_theory.py         # Enharmonics, pitch bounds, diatonic modes, generator
-│   ├── test_cli.py            # Non-destructive CLI safety & default outputs
+│   ├── test_theory.py         # Enharmonics, octave crossing, chord suffixes, diatonic modes
+│   ├── test_cli.py            # Non-destructive CLI safety, race conditions & default outputs
 │   └── test_midi_forge.py     # High-level integration tests
 ├── .github/
 │   └── workflows/ci.yml       # GitHub Actions CI (Ubuntu & Windows, Python 3.9-3.12)
@@ -118,7 +122,7 @@ midi-forge to-json progression.mid --out events.json
 
 ## Running Tests
 
-Run the full automated test suite with pytest:
+Run the full automated test suite with pytest (64 collected test items):
 ```bash
 pytest -v
 ```

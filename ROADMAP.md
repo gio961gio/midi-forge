@@ -28,6 +28,16 @@ This roadmap outlines completed milestones and planned future work for **Midi Fo
 
 ---
 
+## Phase 1.2: MIDI Data Integrity & Edge Cases (Completed - v0.1.2)
+- [x] **Preserve SysEx Status Byte (0xF0 vs 0xF7)**: Preserve original SysEx status byte and raw payload across SMF serialization/deserialization without forcing all SysEx events to 0xF0.
+- [x] **Authoritative Track Name & Meta Preservation**: `MidiTrack.name` is authoritative and automatically serialized as Track Name (`0xFF 0x03`) without duplicates; all other meta events (`0x01` text, `0x02` copyright, `0x05` lyric, etc.) retain their distinct `meta_type` and raw payload.
+- [x] **Strict Pre-Serialization Validation**: Elimination of silent `& 0x7F` masking and clamping; validation of all channel, meta, file, and track parameters prior to SMF serialization.
+- [x] **Race-Safe CLI No-Overwrite**: Atomic no-replace publication via hard-links (`os.link`) when `force=False`, protecting against concurrent file creation races; guaranteed temp file cleanup.
+- [x] **Correct Enharmonic Octave Crossing**: Absolute pitch offset calculation handling B#4 (C5 = 72) and Cb4 (B3 = 59) across octave boundaries under `C4 = MIDI 60`.
+- [x] **Strict Roman Numeral Suffixes**: Explicit grammar supporting `°` (diminished triad), `+` (augmented triad), and `7` (modal scale-stacked 4-note seventh chords); rejection of malformed suffixes (`I++`, `V77`).
+
+---
+
 ## Phase 2: Advanced Arpeggiator & Voice Leading (~8 Hours)
 - [ ] **Voice Leading Optimizer**: Implement parsimonious voice leading algorithm to minimize harmonic voice movement between chords.
 - [ ] **Euclidean Rhythm Generator**: Generate Bjorklund euclidean rhythms for polyrhythmic hi-hats and percussion MIDI.
