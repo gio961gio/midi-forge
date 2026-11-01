@@ -96,3 +96,113 @@ def test_cli_humanize_and_quantize_default_filenames(monkeypatch):
         expected_q = os.path.join(tmp, "riff_quantized.mid")
         assert os.path.exists(expected_q)
         assert expected_q != input_mid
+
+
+# =========================================================================
+# 6. Race-safe No-Overwrite and Temp File Cleanup Tests
+# =========================================================================
+
+def test_race_condition_simulation_safe_write_midi():
+    """
+    Simulate a race where another process creates the destination file
+    between the initial existence check and final atomic publication.
+    Verify force=False fails with FileExistsError, preserving the racing bytes.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        target_path = os.path.join(tmp, "race_target.mid")
+        mf = generate_progression_midi(progression="I-V")
+
+        # Monkeypatch save on this instance to simulate another process creating target_path during serialization
+        original_save = mf.save
+
+        def racing_save(temp_path):
+            # Another process creates target_path right before publication
+            with open(target_path, "wb") as f_race:
+                f_race.write(b"RACING_PROCESS_MIDI_BYTES")
+            original_save(temp_path)
+
+        mf.save = racing_save
+
+        with pytest.raises(FileExistsError, match="Destination file already exists"):
+            safe_write_midi(mf, target_path, force=False)
+
+        # Pre-existing racing file must remain unchanged
+        assert open(target_path, "rb").read() == b"RACING_PROCESS_MIDI_BYTES"
+
+        # Verify no orphaned temporary files exist in the directory
+        temp_files = [f for f in os.listdir(tmp) if f.startswith(".midi_forge_tmp_")]
+        assert len(temp_files) == 0
+
+
+def test_race_condition_simulation_safe_write_json(monkeypatch):
+    """
+    Simulate a race during JSON export where the destination is created concurrently.
+    Verify force=False fails with FileExistsError and preserves the racing content.
+    """
+    import json
+
+    with tempfile.TemporaryDirectory() as tmp:
+        target_path = os.path.join(tmp, "race_target.json")
+        data = {"hello": "world"}
+
+        original_dump = json.dump
+
+        def racing_dump(obj, fp, **kwargs):
+            # Another process creates target_path concurrently
+            with open(target_path, "w", encoding="utf-8") as f_race:
+                f_race.write('{"racing": "concurrent_data"}')
+            original_dump(obj, fp, **kwargs)
+
+        monkeypatch.setattr("json.dump", racing_dump)
+
+        with pytest.raises(FileExistsError, match="Destination file already exists"):
+            safe_write_json(data, target_path, force=False)
+
+        assert open(target_path, "r", encoding="utf-8").read() == '{"racing": "concurrent_data"}'
+        temp_files = [f for f in os.listdir(tmp) if f.startswith(".midi_forge_tmp_")]
+        assert len(temp_files) == 0
+
+
+def test_temp_files_cleaned_up_on_serialization_failure():
+    """Verify that temporary files are cleaned up if serialization raises an exception."""
+    with tempfile.TemporaryDirectory() as tmp:
+        target_path = os.path.join(tmp, "error_target.mid")
+        mf = generate_progression_midi(progression="I-V")
+
+        def broken_save(temp_path):
+            with open(temp_path, "wb") as f:
+                f.write(b"partial corrupted data")
+            raise RuntimeError("Unexpected disk error during save")
+
+        mf.save = broken_save
+
+        with pytest.raises(RuntimeError, match="Unexpected disk error"):
+            safe_write_midi(mf, target_path, force=False)
+
+        assert not os.path.exists(target_path)
+        temp_files = [f for f in os.listdir(tmp) if f.startswith(".midi_forge_tmp_")]
+        assert len(temp_files) == 0
+
+
+def test_source_file_untouched_on_humanize_and_quantize(monkeypatch):
+    """Verify input MIDI file remains byte-for-byte identical when humanize/quantize run."""
+    with tempfile.TemporaryDirectory() as tmp:
+        input_mid = os.path.join(tmp, "original.mid")
+        mf = generate_progression_midi(progression="I-V-vi-IV")
+        mf.save(input_mid)
+        original_bytes = open(input_mid, "rb").read()
+
+        # Run humanize with default output
+        monkeypatch.setattr("sys.argv", ["midi-forge", "humanize", input_mid])
+        main()
+        assert open(input_mid, "rb").read() == original_bytes
+
+        # Run quantize with default output
+        monkeypatch.setattr("sys.argv", ["midi-forge", "quantize", input_mid])
+        main()
+        assert open(input_mid, "rb").read() == original_bytes
+
+        # In-place replacement with --force works
+        monkeypatch.setattr("sys.argv", ["midi-forge", "humanize", input_mid, "--out", input_mid, "--force"])
+        main()
+        assert os.path.exists(input_mid)

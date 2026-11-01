@@ -10,6 +10,49 @@ from .generator import generate_progression_midi
 from .processors import humanize, quantize
 
 
+def _publish_atomic(temp_path: str, target_abs: str, force: bool = False):
+    """
+    Publish a completed temporary file to target_abs.
+
+    - If force=True, atomically replaces target_abs using os.replace().
+    - If force=False, atomically publishes target_abs using os.link() without replacing.
+      Raises FileExistsError if target_abs already exists (including race collisions).
+      Cleans up temp_path on all paths and ensures pre-existing target_abs is never modified.
+    """
+    try:
+        if force:
+            os.replace(temp_path, target_abs)
+        else:
+            try:
+                os.link(temp_path, target_abs)
+            except FileExistsError:
+                raise FileExistsError(
+                    f"Destination file already exists: '{target_abs}'. Use --force to overwrite."
+                )
+            except OSError as exc:
+                # EEXIST handling across platforms (e.g. Windows WinError 183 or errno 17)
+                if getattr(exc, "winerror", None) == 183 or getattr(exc, "errno", None) == 17:
+                    raise FileExistsError(
+                        f"Destination file already exists: '{target_abs}'. Use --force to overwrite."
+                    )
+                raise OSError(
+                    f"Exclusive file publication failed for '{target_abs}': {exc}. "
+                    "Filesystem may not support hard-link publication without overwrite."
+                ) from exc
+            finally:
+                if os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except Exception:
+                        pass
+    finally:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+
+
 def safe_write_midi(
     midi_file: MidiFile,
     target_path: str,
@@ -19,7 +62,8 @@ def safe_write_midi(
     """
     Safely write MIDI file to disk, refusing to overwrite existing files unless force=True.
 
-    Uses atomic replacement via temporary file in target directory to prevent partial files.
+    Uses atomic publication via temporary file in target directory to prevent partial files
+    and race-safe no-clobber hard-link publication when force=False.
     """
     target_abs = os.path.abspath(target_path)
     target_real = os.path.realpath(target_abs)
@@ -43,7 +87,7 @@ def safe_write_midi(
     os.close(temp_fd)
     try:
         midi_file.save(temp_path)
-        os.replace(temp_path, target_abs)
+        _publish_atomic(temp_path, target_abs, force=force)
     except Exception:
         if os.path.exists(temp_path):
             try:
@@ -58,7 +102,7 @@ def safe_write_json(
     target_path: str,
     force: bool = False,
 ):
-    """Safely write JSON file to disk with atomic replacement and non-destructive overwrite guards."""
+    """Safely write JSON file to disk with race-safe atomic publication and non-destructive overwrite guards."""
     target_abs = os.path.abspath(target_path)
     if os.path.exists(target_abs) and not force:
         raise FileExistsError(
@@ -72,7 +116,7 @@ def safe_write_json(
     try:
         with os.fdopen(temp_fd, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
-        os.replace(temp_path, target_abs)
+        _publish_atomic(temp_path, target_abs, force=force)
     except Exception:
         if os.path.exists(temp_path):
             try:
