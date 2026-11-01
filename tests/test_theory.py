@@ -132,3 +132,100 @@ def test_generator_parameter_validation():
 
     with pytest.raises(ValueError, match="velocity must be in range 1..127"):
         generate_progression_midi(velocity=128)
+
+
+# =========================================================================
+# 4. Enharmonic Octave Handling (B#, Cb, E#, Fb)
+# =========================================================================
+
+def test_enharmonic_octave_crossing():
+    """Verify B# and Cb correctly cross octave boundaries under C4=60 convention."""
+    # B#4 must be C5 (72), Cb4 must be B3 (59)
+    assert note_to_midi("B#", 4) == 72
+    assert note_to_midi("b#", 4) == 72
+    assert note_to_midi("Cb", 4) == 59
+    assert note_to_midi("cb", 4) == 59
+    assert note_to_midi("CB", 4) == 59
+
+    # E#4 and Fb4 within same octave
+    assert note_to_midi("E#", 4) == note_to_midi("F", 4) == 65
+    assert note_to_midi("e#", 4) == note_to_midi("f", 4) == 65
+    assert note_to_midi("Fb", 4) == note_to_midi("E", 4) == 64
+    assert note_to_midi("fb", 4) == note_to_midi("e", 4) == 64
+
+    # Boundary tests: pitch calculation before bounds check
+    assert note_to_midi("C", -1) == 0
+    assert note_to_midi("B#", -1) == 12  # C0
+    assert note_to_midi("Cb", 0) == 11   # B-1
+    assert note_to_midi("G", 9) == 127
+
+    # Reject only when final computed pitch is outside 0..127
+    with pytest.raises(ValueError, match="out of bounds"):
+        note_to_midi("Cb", -1)  # pitch = -1
+
+    with pytest.raises(ValueError, match="out of bounds"):
+        note_to_midi("G#", 9)  # pitch = 128
+
+    with pytest.raises(ValueError, match="out of bounds"):
+        note_to_midi("B#", 9)  # pitch = 132
+
+
+# =========================================================================
+# 5. Roman Numeral Chord Quality and Suffix Tests
+# =========================================================================
+
+def test_roman_numeral_suffixes_augmented_diminished_and_seventh():
+    """Verify °, +, and 7 suffixes produce exact musical voicings without character stripping."""
+    # 1. Augmented triad (root, root + 4, root + 8)
+    c_aug = parse_progression("I+", root_name="C", scale_type="major", octave=4)
+    assert len(c_aug) == 1
+    assert c_aug[0] == [60, 64, 68]  # C, E, G#
+
+    # 2. Dominant 7th in C Major (V7 = G-B-D-F: 4-note voicing)
+    c_v7 = parse_progression("V7", root_name="C", scale_type="major", octave=4)
+    assert len(c_v7) == 1
+    assert c_v7[0] == [67, 71, 74, 77]  # G4, B4, D5, F5
+
+    # 3. Diminished triad (vii° in C Major = B-D-F)
+    c_vii_dim = parse_progression("vii°", root_name="C", scale_type="major", octave=4)
+    assert len(c_vii_dim) == 1
+    assert c_vii_dim[0] == [71, 74, 77]  # B4, D5, F5
+
+    # 4. Modal 7th chord (stacked from scale degrees, not hard-coded major/minor)
+    # In D Dorian: i7 is Dm7 [D4, F4, A4, C5]
+    d_dorian_i7 = parse_progression("i7", root_name="D", scale_type="dorian", octave=4)
+    assert d_dorian_i7[0] == [62, 65, 69, 72]
+
+    # In D Dorian: IV7 is G7 [G4, B4, D5, F5] (characteristic major IV with minor 7th)
+    d_dorian_iv7 = parse_progression("IV7", root_name="D", scale_type="dorian", octave=4)
+    assert d_dorian_iv7[0] == [67, 71, 74, 77]
+
+    # 5. Ordinary progressions retain their exact triads
+    prog_ord = parse_progression("I-V-vi-IV", root_name="C", scale_type="major", octave=4)
+    assert prog_ord == [
+        [60, 64, 67],  # C
+        [67, 71, 74],  # G
+        [69, 72, 76],  # Am
+        [65, 69, 72],  # F
+    ]
+
+
+def test_roman_numeral_malformed_suffixes_rejected():
+    """Verify that malformed suffixes and unsupported token syntax raise ValueError."""
+    with pytest.raises(ValueError, match="Unsupported Roman numeral token"):
+        parse_progression("I++", root_name="C")
+
+    with pytest.raises(ValueError, match="Unsupported Roman numeral token"):
+        parse_progression("V77", root_name="C")
+
+    with pytest.raises(ValueError, match="Unsupported Roman numeral token"):
+        parse_progression("vii°°", root_name="C")
+
+    with pytest.raises(ValueError, match="Unsupported Roman numeral token"):
+        parse_progression("Imaj7", root_name="C")
+
+    with pytest.raises(ValueError, match="Unsupported Roman numeral token"):
+        parse_progression("I+7", root_name="C")
+
+    with pytest.raises(ValueError, match="Unsupported Roman numeral token"):
+        parse_progression("I_foo", root_name="C")

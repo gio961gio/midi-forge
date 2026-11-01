@@ -4,19 +4,14 @@ from typing import List, Dict
 
 NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
-SEMITONE_MAP = {
-    "C": 0, "B#": 0,
-    "C#": 1, "DB": 1,
+BASE_NOTE_SEMITONES: Dict[str, int] = {
+    "C": 0,
     "D": 2,
-    "D#": 3, "EB": 3,
-    "E": 4, "FB": 4,
-    "F": 5, "E#": 5,
-    "F#": 6, "GB": 6,
+    "E": 4,
+    "F": 5,
     "G": 7,
-    "G#": 8, "AB": 8,
     "A": 9,
-    "A#": 10, "BB": 10,
-    "B": 11, "CB": 11,
+    "B": 11,
 }
 
 SCALE_INTERVALS = {
@@ -41,22 +36,44 @@ ROMAN_NUMERAL_DEGREE = {
     "i": 0, "ii": 1, "iii": 2, "iv": 3, "v": 4, "vi": 5, "vii": 6,
 }
 
+CHORD_TOKEN_REGEX = re.compile(r"^([IVXivx]+)([°+7])?$")
+
 
 def note_to_midi(name: str, octave: int = 4) -> int:
     """
     Convert note name with optional sharp/flat and octave to MIDI pitch (C4 = 60).
 
-    Supports enharmonic spellings (e.g. C#/Db, D#/Eb, F#/Gb, G#/Ab, A#/Bb).
+    Supports enharmonic spellings (e.g. B#4 = C5 = 72, Cb4 = B3 = 59, E#4 = F4 = 65, Fb4 = E4 = 64).
+    Calculates absolute pitch with accidental offsets before bounds checking to correctly handle
+    enharmonic octave crossings.
     Raises ValueError for invalid note names or out-of-bounds MIDI pitches (0..127).
     """
-    clean_name = name.strip().upper()
-    if clean_name not in SEMITONE_MAP:
+    if not isinstance(octave, int) or isinstance(octave, bool):
+        raise ValueError(f"Octave must be an integer, got: {octave!r}")
+
+    clean = name.strip()
+    if not clean:
+        raise ValueError("Note name cannot be empty")
+
+    letter = clean[0].upper()
+    if letter not in BASE_NOTE_SEMITONES:
         raise ValueError(
-            f"Invalid note name: '{name}'. Supported notes include: C, C#/Db, D, D#/Eb, E, F, F#/Gb, G, G#/Ab, A, A#/Bb, B"
+            f"Invalid note name: '{name}'. Supported base letters: A, B, C, D, E, F, G"
         )
 
-    semitone = SEMITONE_MAP[clean_name]
-    pitch = 12 * (octave + 1) + semitone
+    accidental_str = clean[1:].strip().lower()
+    if accidental_str in ("",):
+        acc_offset = 0
+    elif accidental_str in ("#", "sharp"):
+        acc_offset = 1
+    elif accidental_str in ("b", "flat"):
+        acc_offset = -1
+    else:
+        raise ValueError(
+            f"Invalid accidental '{clean[1:]}' in note name '{name}'. Supported: '', '#', 'b'"
+        )
+
+    pitch = 12 * (octave + 1) + BASE_NOTE_SEMITONES[letter] + acc_offset
 
     if not (0 <= pitch <= 127):
         raise ValueError(f"Computed MIDI pitch {pitch} for note '{name}{octave}' is out of bounds (0-127)")
@@ -66,8 +83,8 @@ def note_to_midi(name: str, octave: int = 4) -> int:
 
 def midi_to_note(midi_pitch: int) -> str:
     """Convert MIDI number to human-readable string like 'C4'."""
-    if not (0 <= midi_pitch <= 127):
-        raise ValueError(f"MIDI pitch {midi_pitch} is out of bounds (0-127)")
+    if not isinstance(midi_pitch, int) or isinstance(midi_pitch, bool) or not (0 <= midi_pitch <= 127):
+        raise ValueError(f"MIDI pitch {midi_pitch!r} is out of bounds (0-127)")
     octave = (midi_pitch // 12) - 1
     name = NOTE_NAMES[midi_pitch % 12]
     return f"{name}{octave}"
@@ -96,8 +113,13 @@ def parse_progression(
     """
     Convert Roman numeral chord progression (e.g. 'I-V-vi-IV' or 'ii-V-I') into diatonic MIDI chords.
 
-    Diatonic triads are derived from the specified scale/mode by stacking scale thirds.
-    Rejects invalid tokens and unsupported scales (such as pentatonic/blues) with informative errors.
+    Supports documented quality and extension suffixes:
+    - '°': diminished triad (root, minor third +3, diminished fifth +6)
+    - '+': augmented triad (root, major third +4, augmented fifth +8)
+    - '7': diatonic seventh chord stacked in scale thirds (root, 3rd, 5th, 7th) from the selected scale/mode
+    - (no suffix): diatonic triad (root, 3rd, 5th) stacked from the selected scale/mode
+
+    Rejects malformed suffixes (e.g. 'I++', 'V77') and unsupported scales with informative errors.
     """
     if not prog_str or not prog_str.strip():
         raise ValueError("Progression string cannot be empty")
@@ -122,8 +144,14 @@ def parse_progression(
 
     chords = []
     for token in raw_tokens:
-        # Normalize symbol: strip trailing degree decorators (° for diminished, + for augmented, 7 for 7th)
-        base_roman = token.rstrip("°+7")
+        match = CHORD_TOKEN_REGEX.fullmatch(token)
+        if not match:
+            raise ValueError(
+                f"Unsupported Roman numeral token: '{token}'. "
+                "Tokens must consist of a Roman numeral (I..VII, i..vii) optionally followed by '°', '+', or '7'."
+            )
+
+        base_roman, suffix = match.groups()
         if base_roman not in ROMAN_NUMERAL_DEGREE:
             raise ValueError(
                 f"Unsupported Roman numeral token: '{token}'. "
@@ -134,12 +162,36 @@ def parse_progression(
         if degree >= num_scale_notes:
             raise ValueError(f"Degree {degree + 1} exceeds scale note count ({num_scale_notes})")
 
-        # Build diatonic triad by stacking scale degrees (root, 3rd, 5th)
         root_pitch = scale_notes[degree]
-        third_pitch = scale_notes[(degree + 2) % num_scale_notes] + (12 if degree + 2 >= num_scale_notes else 0)
-        fifth_pitch = scale_notes[(degree + 4) % num_scale_notes] + (12 if degree + 4 >= num_scale_notes else 0)
 
-        chord = [root_pitch, third_pitch, fifth_pitch]
+        def _get_scale_degree_pitch(degree_idx: int, step_offset: int) -> int:
+            idx = degree_idx + step_offset
+            octave_shift = (idx // num_scale_notes) * 12
+            note_idx = idx % num_scale_notes
+            return scale_notes[note_idx] + octave_shift
+
+        if suffix == "°":
+            # Diminished triad: root, minor third (+3), diminished fifth (+6)
+            chord = [root_pitch, root_pitch + 3, root_pitch + 6]
+        elif suffix == "+":
+            # Augmented triad: root, major third (+4), augmented fifth (+8)
+            chord = [root_pitch, root_pitch + 4, root_pitch + 8]
+        elif suffix == "7":
+            # Diatonic 7th chord stacked in scale thirds
+            chord = [
+                _get_scale_degree_pitch(degree, 0),
+                _get_scale_degree_pitch(degree, 2),
+                _get_scale_degree_pitch(degree, 4),
+                _get_scale_degree_pitch(degree, 6),
+            ]
+        else:
+            # Diatonic triad stacked in scale thirds
+            chord = [
+                _get_scale_degree_pitch(degree, 0),
+                _get_scale_degree_pitch(degree, 2),
+                _get_scale_degree_pitch(degree, 4),
+            ]
+
         for p in chord:
             if not (0 <= p <= 127):
                 raise ValueError(f"Chord pitch {p} in chord '{token}' is out of MIDI bounds (0-127)")
